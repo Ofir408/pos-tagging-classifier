@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 import torchtext
 # from torchtext import data
+from torch.nn.utils.rnn import pad_sequence
 from torchtext.legacy import data
 import torch.optim as optim
 from math import log, isfinite
@@ -359,10 +360,9 @@ class VanillaBiLSTM(nn.Module):
                             dropout=0.5, dtype=torch.double)
         self.linear1 = nn.Linear(56 * 2, self.params_d['output_dimension'],
                                  dtype=torch.double)  # it's 56*2 due to bidirectional
-        #self.linear2 = nn.Linear(56, self.params_d['output_dimension'],  dtype=torch.double)
+        # self.linear2 = nn.Linear(56, self.params_d['output_dimension'],  dtype=torch.double)
         self.dropout = nn.Dropout(0.5)
         self.relu = nn.ReLU()
-        self.batch_norm = nn.BatchNorm2d(100, affine=False)
 
     def get_embeddings(self, vocab_tokens):
         # vocab = torchtext.vocab.build_vocab_from_iterator(vocab_tokens)
@@ -376,24 +376,53 @@ class VanillaBiLSTM(nn.Module):
         # embeddings = nn.Embedding.from_pretrained(weights)
         return embeddings, embeddings_dict.keys()
 
-    def forward(self, text):
-        words_id = list(map(lambda word: self.words_to_id[
-            word.lower()] if word.lower() in self.words_to_id else self.embeddings.padding_idx, text))
-        words_id_tensor = torch.tensor(words_id, dtype=torch.int)
-        x = self.embeddings(words_id_tensor)[None]
-        #x = self.relu(x)
+    def forward(self, texts):
+        texts_to_word_ids = []
+        for text in texts:
+            words_id = list(map(lambda word: self.words_to_id[
+                word.lower()] if word.lower() in self.words_to_id else self.embeddings.padding_idx, text.split()))
+            texts_to_word_ids.append(words_id)
+
+        text_tensors = []
+        for text_to_word_ids in texts_to_word_ids:
+            text_to_words_id_tensor = torch.tensor(text_to_word_ids, dtype=torch.int)
+            text_tensors.append(text_to_words_id_tensor)
+
+        text_tensors = pad_sequence(text_tensors, padding_value=0)
+        # stacked_tensor = torch.stack(text_tensors)
+
+        x = self.embeddings(text_tensors)
+        # x = self.relu(x)
         outputs, _ = self.lstm(x)
-       #outputs = self.relu(outputs)
-        # outputs = self.dropout(outputs)
+        # outputs = self.relu(outputs)
+        #outputs = self.dropout(outputs)
         outputs = self.linear1(outputs)
-        #outputs = self.linear2(outputs)
+        # outputs = self.linear2(outputs)
         return outputs
 
-    def tags_to_ids(self, tags, words):
+    def tags_to_ids(self, tags_list, words_list):
+        """
         tags_id = list(
             map(lambda t: self.tags_to_id[t[1]] if t[0].lower() in self.words_to_id else -1, zip(words, tags)))
         tags_id_tensor = torch.tensor(tags_id, dtype=torch.int)
         return tags_id_tensor
+
+
+        """
+        tag_ids_list = []
+        for i in range(len(tags_list)):
+            current_tags = tags_list[i]
+            current_words = words_list[i]
+            tags_id = list(
+                map(lambda t: self.tags_to_id[t[1]] if t[0].lower() in self.words_to_id else -1,
+                    zip(current_words, current_tags)))
+            tags_id_tensor = torch.tensor(tags_id, dtype=torch.int)
+            tag_ids_list.append(tags_id_tensor)
+
+        # padding the tags to be same value within batch.
+        tags_tensors = pad_sequence(tag_ids_list, padding_value=-1)
+        # tensor size:[padded_tags_num, batch size]
+        return tags_tensors
 
     def ids_to_tags(self, ids):
         ids_to_tags = {v: k for k, v in self.tags_to_id.items()}
@@ -566,8 +595,8 @@ def train_rnn(model, train_data, val_data=None):
 
     # TODO complete the code
     # TODO: add ignore_index  to CrossEntropyLoss(..)
-    epochs_num = 28
-    criterion = nn.CrossEntropyLoss(ignore_index=-1)  # you can set the parameters as you like
+    epochs_num = 20
+    criterion = nn.CrossEntropyLoss(ignore_index=-1)  # you can set the parameters as you like TODO: check 0/-1
     # vectors = load_pretrained_embeddings(pretrained_embeddings_fn)
     # model = model.to(device)
     criterion = criterion.to(device)
@@ -590,10 +619,10 @@ def train_rnn(model, train_data, val_data=None):
             optimizer.zero_grad()
             # words = batch.dataset['words']
             # tags = batch.dataset['tags']
-            words, tags = temp_from_dict_to_words_tags(batch)
-            y = lstm_model.tags_to_ids(tags, words)  # TODO: consider to change it.
-            optimizer.zero_grad()
-            pred = lstm_model(words)
+            words, tags = from_dict_to_words_tags(batch)
+            sentences = [" ".join(sentence) for sentence in words]
+            y = lstm_model.tags_to_ids(tags, words)  # tensor size:[padded_tags_num, batch size]
+            pred = lstm_model(sentences)
             pred = pred.view(-1, pred.shape[-1])
             y = y.view(-1).long()
             # print(f'pred.dtype {pred.dtype}, y.dtype={y.dtype}')
@@ -615,8 +644,15 @@ def temp_from_dict_to_words_tags(batch_lists):
     for current_list in batch_lists:
         words.extend(current_list['words'])
         tags.extend(current_list['tags'])
-        # words.extend(current_list['words'])
-        # tags.extend(current_list['tags'])
+    return words, tags
+
+
+def from_dict_to_words_tags(batch_lists):
+    words = []
+    tags = []
+    for current_list in batch_lists:
+        words.append(current_list['words'])
+        tags.append(current_list['tags'])
     return words, tags
 
 
@@ -673,7 +709,7 @@ def rnn_tag_sentence(sentence, model):
     # TODO complete the code
     with torch.no_grad():
         lstm_model = model['lstm'].to(device)
-        pred = lstm_model(sentence)
+        pred = lstm_model([" ".join(sentence)])
         pred = pred.view(-1, pred.shape[-1])
         pred_ids = pred.argmax(-1).tolist()
         pred_tags = lstm_model.ids_to_tags(pred_ids)
