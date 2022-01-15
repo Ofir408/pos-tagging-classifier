@@ -10,8 +10,6 @@ import math
 
 import torch
 import torch.nn as nn
-import torchtext
-# from torchtext import data
 from torch.nn.utils.rnn import pad_sequence
 from torchtext.legacy import data
 import torch.optim as optim
@@ -19,6 +17,7 @@ from math import log, isfinite
 from collections import Counter
 import numpy as np
 import sys, os, time, platform, nltk, random
+import copy
 
 # With this line you don't need to worry about the HW  -- GPU or CPU
 # GPU cuda cores will be used if available
@@ -345,12 +344,12 @@ def joint_prob(sentence, A, B):
 
 
 class VanillaBiLSTM(nn.Module):
-    def __init__(self, params_d):
+    def __init__(self, params_d, with_feature_vec=False):
         super().__init__()
         self.params_d = params_d
         vocab, tags = get_vocab_and_tags(self.params_d['data_fn'], self.params_d['min_frequency'],
                                          self.params_d['max_vocab_size'])
-        self.embeddings, embedded_tokens = self.get_embeddings(vocab)
+        self.embeddings, embedded_tokens = self.get_embeddings(vocab, with_feature_vec)
         self.tags_to_id = {tag: tag_id for tag_id, tag in enumerate(tags)}
         self.words_to_id = {word.lower(): word_id for word_id, word in enumerate(embedded_tokens)}
         self.lstm = nn.LSTM(input_size=self.params_d['embedding_dimension'],
@@ -364,16 +363,16 @@ class VanillaBiLSTM(nn.Module):
         self.dropout = nn.Dropout(0.5)
         self.relu = nn.ReLU()
 
-    def get_embeddings(self, vocab_tokens):
-        # vocab = torchtext.vocab.build_vocab_from_iterator(vocab_tokens)
+    def get_embeddings(self, vocab_tokens, with_custom_features):
         embeddings_dict = load_pretrained_embeddings(self.params_d['pretrained_embeddings_fn'], vocab_tokens)
-        embeddings_dict['padding'] = np.random.randn(100)
+        if with_custom_features:
+            embeddings_dict = add_custom_features(embeddings_dict)
+        embeddings_dict['padding'] = np.random.uniform(-0.1, 0.1, 103 if with_custom_features else 100)
         weights = np.array(list(embeddings_dict.values()))
         weights = torch.from_numpy(weights)
         # Embedding from vocab_size to 100
         # embeddings size: [vocab_size, 100]
         embeddings = nn.Embedding.from_pretrained(weights, padding_idx=len(weights) - 1)
-        # embeddings = nn.Embedding.from_pretrained(weights)
         return embeddings, embeddings_dict.keys()
 
     def forward(self, texts):
@@ -389,26 +388,13 @@ class VanillaBiLSTM(nn.Module):
             text_tensors.append(text_to_words_id_tensor)
 
         text_tensors = pad_sequence(text_tensors, padding_value=0)
-        # stacked_tensor = torch.stack(text_tensors)
 
         x = self.embeddings(text_tensors)
-        # x = self.relu(x)
         outputs, _ = self.lstm(x)
-        # outputs = self.relu(outputs)
-        #outputs = self.dropout(outputs)
         outputs = self.linear1(outputs)
-        # outputs = self.linear2(outputs)
         return outputs
 
     def tags_to_ids(self, tags_list, words_list):
-        """
-        tags_id = list(
-            map(lambda t: self.tags_to_id[t[1]] if t[0].lower() in self.words_to_id else -1, zip(words, tags)))
-        tags_id_tensor = torch.tensor(tags_id, dtype=torch.int)
-        return tags_id_tensor
-
-
-        """
         tag_ids_list = []
         for i in range(len(tags_list)):
             current_tags = tags_list[i]
@@ -427,6 +413,28 @@ class VanillaBiLSTM(nn.Module):
     def ids_to_tags(self, ids):
         ids_to_tags = {v: k for k, v in self.tags_to_id.items()}
         return [ids_to_tags[tag_id] for tag_id in ids]
+
+
+class CaseBasedBiLSTM(VanillaBiLSTM):
+    def __init__(self, params_d):
+        super().__init__(params_d, with_feature_vec=True)
+
+
+def add_custom_features(embedding_dict):
+    """
+
+    Args:
+        embedding_dict (dict):
+
+    Returns:
+        dict: the dict with the features 3 dim vector, concat to the embedding vector
+    """
+    new_dict = copy.deepcopy(embedding_dict)
+    for word, embedding_vec in embedding_dict.items():
+        feature_vec = extract_feature_vec(word)
+        concat_vec = np.concatenate((embedding_vec, feature_vec))
+        new_dict[word] = concat_vec
+    return new_dict
 
 
 def get_vocab_and_tags(data_fn, min_frequency, max_vocab_size):
@@ -519,9 +527,7 @@ def initialize_rnn_model(params_d):
         # vanilla lstm
         model = VanillaBiLSTM(params_d)
     else:
-        # TODO: add the the second case for 1 (case-base)
-        model = None
-        raise NotImplementedError("Should be implemented!!")
+        model = CaseBasedBiLSTM(params_d)
     return {'lstm': model, 'input_rep': input_rep}
 
     # no need for this one as part of the API
@@ -594,11 +600,8 @@ def train_rnn(model, train_data, val_data=None):
     #    the required API)
 
     # TODO complete the code
-    # TODO: add ignore_index  to CrossEntropyLoss(..)
     epochs_num = 20
     criterion = nn.CrossEntropyLoss(ignore_index=-1)  # you can set the parameters as you like TODO: check 0/-1
-    # vectors = load_pretrained_embeddings(pretrained_embeddings_fn)
-    # model = model.to(device)
     criterion = criterion.to(device)
     lstm_model = model['lstm'].to(device)
     optimizer = optim.Adam(lstm_model.parameters())
@@ -615,23 +618,19 @@ def train_rnn(model, train_data, val_data=None):
         epoch_loss = 0
         train_iterator.create_batches()
         for inx, batch in enumerate(train_iterator.batches):
-            # print(f'batch inx= {inx}/{len(train_iterator) // batch.batch_size}')
             optimizer.zero_grad()
-            # words = batch.dataset['words']
-            # tags = batch.dataset['tags']
             words, tags = from_dict_to_words_tags(batch)
             sentences = [" ".join(sentence) for sentence in words]
             y = lstm_model.tags_to_ids(tags, words)  # tensor size:[padded_tags_num, batch size]
             pred = lstm_model(sentences)
             pred = pred.view(-1, pred.shape[-1])
             y = y.view(-1).long()
-            # print(f'pred.dtype {pred.dtype}, y.dtype={y.dtype}')
-            # print(f'pred.shape= {pred.shape}, y.shape= {y.shape}')
             loss = criterion(pred, y)
             epoch_loss += loss
             loss.backward()
             optimizer.step()
         print(f'avg loss = {epoch_loss / len(train_iterator)}, epoch={epoch + 1}')
+
         if validation_iterator is not None:
             validation_iterator.create_batches()
             result = count_correct_validation(model, validation_iterator)
@@ -659,16 +658,6 @@ def from_dict_to_words_tags(batch_lists):
 def count_correct_validation(model, val_data):
     all_predicted_tags = []
     all_tags = []
-    """
-        for batch in val_data.batches:
-        words, tags = temp_from_dict_to_words_tags(batch)
-        all_tags.extend(list(zip(words, tags)))
-        # words = batch.dataset['words']
-        # all_tags.extend(list(zip(words, batch.dataset['tags'])))
-        all_predicted_tags.extend(rnn_tag_sentence(words, model))
-    print(f'all_tags.len = {len(all_tags)}')
-
-    """
     words, tags = temp_from_dict_to_words_tags(list(val_data.dataset.values()))
     all_tags.extend(list(zip(words, tags)))
     print(f'all_tags.len = {len(all_tags)}')
@@ -714,7 +703,6 @@ def rnn_tag_sentence(sentence, model):
         pred_ids = pred.argmax(-1).tolist()
         pred_tags = lstm_model.ids_to_tags(pred_ids)
         return [(word, tag) for word, tag in zip(sentence, pred_tags)]
-    # return tagged_sentence
 
 
 def get_best_performing_model_params():
@@ -801,3 +789,26 @@ def count_correct(gold_sentence, pred_sentence):
             if pred_word not in perWordTagCounts.keys():
                 oov_count += 1
     return correct_count, correct_oov_count, oov_count
+
+
+# Feature Extraction Functions:
+def extract_feature_vec(word):
+    """
+    Features:
+
+        1) 1 if the word is full lowercase
+
+        2) 1 if the word is full uppercase
+
+        3) 1 if the word is leading with a capital letter
+
+    Args:
+        word (str): the given word from the sentence to get feature vector for.
+
+    Returns:
+        numpy.array: a three-dimensional binary vector for this word.
+    """
+    is_full_lowercase = word.islower()
+    is_full_uppercase = word.isupper()
+    is_with_capital_letter = word[0].isupper() if len(word) > 0 else False
+    return np.array([is_full_lowercase, is_full_uppercase, is_with_capital_letter], dtype=np.int64)
