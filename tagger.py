@@ -30,7 +30,7 @@ def use_seed(seed=2512021):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.set_deterministic(True)
+    torch.use_deterministic_algorithms(True) # notice: torch.set_deterministic(True) doesn't exist
     # torch.backends.cudnn.deterministic = True
 
 
@@ -530,26 +530,6 @@ def initialize_rnn_model(params_d):
         model = CaseBasedBiLSTM(params_d)
     return {'lstm': model, 'input_rep': input_rep}
 
-    # no need for this one as part of the API
-    # def get_model_params(model):
-    """
-    Returns a dictionary specifying the parameters of the specified model.
-    This dictionary should be used to create another instance of the model.
-
-    Args:
-        model (torch.nn.Module): the network architecture
-
-    Return:
-        a dictionary, containing at least the following keys:
-        {'input_dimension': int,
-        'embedding_dimension': int,
-        'num_of_layers': int,
-        'output_dimension': int}
-    """
-
-    # TODO complete the code
-
-    # return params_d
 
 
 def load_pretrained_embeddings(path, vocab=None):
@@ -600,8 +580,8 @@ def train_rnn(model, train_data, val_data=None):
     #    the required API)
 
     # TODO complete the code
-    epochs_num = 20
-    criterion = nn.CrossEntropyLoss(ignore_index=-1)  # you can set the parameters as you like TODO: check 0/-1
+    epochs_num = 15
+    criterion = nn.CrossEntropyLoss(ignore_index=-1)
     criterion = criterion.to(device)
     lstm_model = model['lstm'].to(device)
     optimizer = optim.Adam(lstm_model.parameters())
@@ -609,7 +589,8 @@ def train_rnn(model, train_data, val_data=None):
     train_data = data_preprocessing(train_data)
     sort_key = lambda x: data.interleave_keys(len(x.q1), len(x.q2))
     if val_data is None:
-        train_iterator = data.BucketIterator.splits(train_data, batch_size=32, device=device, sort_key=sort_key)
+        train_iterator, _ = data.BucketIterator.splits((train_data, None), batch_sizes=(32, 32),
+                                                       device=device, sort_key=lambda x: x)
     else:
         val_data = data_preprocessing(val_data)
         train_iterator, validation_iterator = data.BucketIterator.splits((train_data, val_data), batch_sizes=(32, 32),
@@ -713,7 +694,15 @@ def get_best_performing_model_params():
                initialize_rnn_model() and train_lstm()
     """
     # TODO complete the code
-
+    model_params = {'max_vocab_size': 100000,
+                    'min_frequency': 1,
+                    'input_rep': 0,
+                    'embedding_dimension': 100,
+                    'num_of_layers': 2,
+                    'output_dimension': 17,
+                    'pretrained_embeddings_fn': 'glove.6B.100d.txt',
+                    'data_fn': 'en-ud-train.upos.tsv'
+                    }
     return model_params
 
 
@@ -754,13 +743,13 @@ def tag_sentence(sentence, model):
         list: list of pairs
     """
     if list(model.keys())[0] == 'baseline':
-        return baseline_tag_sentence(sentence, list(model.values())[0], list(model.values())[1])
+        return baseline_tag_sentence(sentence, list(model.values())[0][0], list(model.values())[0][1])
     if list(model.keys())[0] == 'hmm':
-        return hmm_tag_sentence(sentence, list(model.values())[0], list(model.values())[1])
+        return hmm_tag_sentence(sentence, list(model.values())[0][0], list(model.values())[0][1])
     if list(model.keys())[0] == 'blstm':
-        return rnn_tag_sentence(sentence, list(model.values())[0])
+        return rnn_tag_sentence(sentence, list(model.values())[0][0])
     if list(model.keys())[0] == 'cblstm':
-        return rnn_tag_sentence(sentence, list(model.values())[0])
+        return rnn_tag_sentence(sentence, list(model.values())[0][0])
 
 
 def count_correct(gold_sentence, pred_sentence):
